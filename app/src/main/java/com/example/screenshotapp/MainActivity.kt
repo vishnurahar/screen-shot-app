@@ -1,6 +1,9 @@
 package com.example.screenshotapp
 
 import android.app.Activity
+import android.app.AppOpsManager
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -26,196 +29,150 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.screenshotapp.ui.theme.ScreenShotAppTheme
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
-    private var screenshotReceiver: BroadcastReceiver? = null
-    private var screenshotBitmap by mutableStateOf<Bitmap?>(null)
+    private var mediaProjectionIntent: Intent? = null
+    private val requestScreenCapture = 1001
+    private val usageAccessSettings = 1002
+
+    private var hasUsageAccessPermission by mutableStateOf(false)
     private var capturedAppPackage by mutableStateOf<String?>(null)
-    private var isAccessibilityEnabled by mutableStateOf(false)
+    private var screenshotBitmap by mutableStateOf<Bitmap?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        checkUsageAccessPermission()
 
-        isAccessibilityEnabled = isAccessibilityServiceEnabled(this)
-        setupBroadcastReceiver()
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val path = intent?.getStringExtra("screenshot_path")
+                val pkg = intent?.getStringExtra("captured_app")
+
+                if (!path.isNullOrEmpty()) {
+                    screenshotBitmap = BitmapFactory.decodeFile(path)
+                    capturedAppPackage = pkg
+                }
+
+                Log.i(TAG, "onReceive --> In Main Activity --> $pkg")
+            }
+        }
+        registerReceiver(receiver, IntentFilter("screenshot_broadcast"), RECEIVER_EXPORTED)
 
         setContent {
-            ScreenShotAppTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    ScreenshotTakerApp(
-                        capturedBitmap = screenshotBitmap,
-                        capturedApp = capturedAppPackage,
-                        isAccessibilityEnabled = isAccessibilityEnabled,
-                        onEnableAccessibilityClick = {
-                            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                            startActivity(intent)
-                        },
-                        onResultReceived = { resultIntent ->
-                            startScreenshotService(resultIntent)
-                        }
+            ScreenshotUI(
+                hasUsageAccessPermission,
+                capturedAppPackage,
+                screenshotBitmap,
+                onGrantUsagePermission = {
+                    startActivityForResult(
+                        Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS),
+                        usageAccessSettings
                     )
+                },
+                onTakeScreenshot = {
+                    val mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                    startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), requestScreenCapture)
                 }
-            }
+            )
         }
     }
 
-    private fun setupBroadcastReceiver() {
-        screenshotReceiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                Log.d("ScreenshotApp", "Broadcast received")
-                val path = intent?.getStringExtra(ScreenshotService.EXTRA_BITMAP_PATH)
-                val packageName = intent?.getStringExtra(ScreenshotService.EXTRA_CAPTURED_PACKAGE)
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
 
-                if (path != null) {
-                    screenshotBitmap = BitmapFactory.decodeFile(path)
-                }
-
-                if (!packageName.isNullOrEmpty()) {
-                    capturedAppPackage = packageName
-                    Log.d("ScreenshotApp", "Captured app package: $packageName")
-                    context?.let {
-                        Toast.makeText(it, "Captured app: $packageName", Toast.LENGTH_SHORT).show()
-                    }
-                } else {
-                    Log.d("ScreenshotApp", "Captured app package name is null")
-                }
-            }
+        if (requestCode == requestScreenCapture && resultCode == RESULT_OK && data != null) {
+            mediaProjectionIntent = data
+            startScreenshotService()
+        } else if (requestCode == usageAccessSettings) {
+            checkUsageAccessPermission()
         }
-
-        val filter = IntentFilter(ScreenshotService.BROADCAST_ACTION_SCREENSHOT)
-        registerReceiver(screenshotReceiver, filter, RECEIVER_EXPORTED)
     }
 
-    private fun startScreenshotService(resultIntent: Intent) {
-        val serviceIntent = Intent(this, ScreenshotService::class.java).apply {
-            action = ScreenshotService.ACTION_START
-            putExtra(ScreenshotService.EXTRA_RESULT_CODE, Activity.RESULT_OK)
-            putExtra(ScreenshotService.EXTRA_RESULT_INTENT, resultIntent)
+    private fun startScreenshotService() {
+        val intent = Intent(this, ScreenshotService::class.java).apply {
+            action = "ACTION_START"
+            putExtra("result_code", Activity.RESULT_OK)
+            putExtra("result_intent", mediaProjectionIntent)
         }
-        startForegroundService(serviceIntent)
+        ContextCompat.startForegroundService(this, intent)
     }
 
-    override fun onResume() {
-        super.onResume()
-        isAccessibilityEnabled = isAccessibilityServiceEnabled(this)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        screenshotReceiver?.let { unregisterReceiver(it) }
-        stopService(Intent(this, ScreenshotService::class.java))
-    }
-
-    private fun isAccessibilityServiceEnabled(context: Context): Boolean {
-        val expectedService = "${context.packageName}/${ForegroundAppService::class.java.name}"
-        val enabledServices = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: return false
-
-        return enabledServices.split(":").any { it.equals(expectedService, ignoreCase = true) }
+    private fun checkUsageAccessPermission() {
+        val usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        val endTime = System.currentTimeMillis()
+        val beginTime = endTime - 1000 * 10
+        val stats = usageStatsManager.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, beginTime, endTime)
+        hasUsageAccessPermission = stats != null && stats.isNotEmpty()
     }
 }
 
+
+
 @Composable
-fun ScreenshotTakerApp(
-    capturedBitmap: Bitmap?,
+fun ScreenshotUI(
+    hasUsageAccess: Boolean,
     capturedApp: String?,
-    isAccessibilityEnabled: Boolean,
-    onEnableAccessibilityClick: () -> Unit,
-    onResultReceived: (Intent) -> Unit
+    screenshot: Bitmap?,
+    onGrantUsagePermission: () -> Unit,
+    onTakeScreenshot: () -> Unit
 ) {
     val context = LocalContext.current
-    var statusText by remember { mutableStateOf("Click button to take a screenshot") }
-
-    val mediaProjectionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult(),
-        onResult = { result ->
-            if (result.resultCode == Activity.RESULT_OK) {
-                result.data?.let {
-                    statusText = "Permission granted. Capturing..."
-                    onResultReceived(it)
-                }
-            } else {
-                statusText = "Permission denied by user."
-            }
-        }
-    )
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
-            text = if (isAccessibilityEnabled) "Accessibility Service is ENABLED ✅"
-            else "Accessibility Service is NOT enabled ❌",
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.padding(bottom = 16.dp)
+            text = if (hasUsageAccess) "Usage Access Granted ✅" else "Usage Access NOT Granted ❌",
+            style = MaterialTheme.typography.titleMedium
         )
 
-        Button(onClick = onEnableAccessibilityClick) {
-            Text("Enable Accessibility Service")
-        }
+        Spacer(Modifier.height(12.dp))
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Button(
-            onClick = {
-                if (!isAccessibilityEnabled) {
-                    Toast.makeText(context, "Please enable Accessibility Service first", Toast.LENGTH_SHORT).show()
-                    return@Button
-                }
-                val mediaProjectionManager =
-                    context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                mediaProjectionLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+        Button(onClick = {
+            if (!hasUsageAccess) {
+                onGrantUsagePermission()
+            } else {
+                onTakeScreenshot()
             }
-        ) {
+        }) {
             Text("Take Screenshot")
         }
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(Modifier.height(20.dp))
 
-        if (capturedApp != null) {
-            Text(
-                "Captured App: $capturedApp",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary
-            )
+        capturedApp?.let {
+            Text("Captured App: $it", color = Color.Blue)
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        if (capturedBitmap != null) {
-            Text(
-                "Captured Image:",
-                style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
+        screenshot?.let {
+            Spacer(Modifier.height(12.dp))
             Image(
-                bitmap = capturedBitmap.asImageBitmap(),
+                bitmap = it.asImageBitmap(),
                 contentDescription = "Screenshot",
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .aspectRatio(capturedBitmap.width.toFloat() / capturedBitmap.height.toFloat())
-                    .padding(4.dp),
-                contentScale = ContentScale.Fit
+                    .fillMaxWidth(0.5f)
+                    .aspectRatio(it.width.toFloat() / it.height.toFloat())
             )
         }
     }
 }
+
 
 
