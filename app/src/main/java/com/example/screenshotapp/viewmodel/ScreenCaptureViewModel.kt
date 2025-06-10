@@ -1,4 +1,4 @@
-package com.example.screenshotapp
+package com.example.screenshotapp.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope

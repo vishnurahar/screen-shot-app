@@ -15,6 +15,9 @@
 
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
 
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions"/>
+
+
     <application
         android:name=".ScreenShotApplication"
         android:allowBackup="true"
@@ -27,7 +30,7 @@
         android:theme="@style/Theme.ScreenShotApp"
         tools:targetApi="31">
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.MainActivity"
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.ScreenShotApp">
@@ -37,13 +40,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service android:name=".ui.UsageTrackingService" />
         <service
-            android:name=".ScreenshotService"
+            android:name=".services.ScreenshotService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaProjection"/>
         <service
-            android:name=".ForegroundAppService"
+            android:name=".services.ForegroundAppService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true">
             <intent-filter>

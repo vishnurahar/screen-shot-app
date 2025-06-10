@@ -1,4 +1,4 @@
-package com.example.screenshotapp
+package com.example.screenshotapp.services
 
 import android.accessibilityservice.AccessibilityService
 import android.content.BroadcastReceiver
