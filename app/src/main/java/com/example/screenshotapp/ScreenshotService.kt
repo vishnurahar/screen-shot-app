@@ -42,6 +42,12 @@ class ScreenshotService : Service() {
     private var imageReader: ImageReader? = null
     private var virtualDisplay: VirtualDisplay? = null
 
+    private var screenshotCount = 0
+    private val maxScreenshots = 30
+    private val screenshotIntervalMillis = 2000L
+    private var screenshotHandler: Handler? = null
+    private var screenshotRunnable: Runnable? = null
+
     @RequiresApi(Build.VERSION_CODES.Q)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "ACTION_START") {
@@ -58,15 +64,20 @@ class ScreenshotService : Service() {
                 }
             }, Handler(Looper.getMainLooper()))
 
-            takeScreenshot()
+            startTakingScreenshots()
         }
 
         return START_NOT_STICKY
     }
 
-    private fun takeScreenshot() {
+    private fun startTakingScreenshots() {
         val metrics = Resources.getSystem().displayMetrics
-        imageReader = ImageReader.newInstance(metrics.widthPixels, metrics.heightPixels, PixelFormat.RGBA_8888, 2)
+        imageReader = ImageReader.newInstance(
+            metrics.widthPixels,
+            metrics.heightPixels,
+            PixelFormat.RGBA_8888,
+            2
+        )
 
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ScreenshotService",
@@ -77,41 +88,50 @@ class ScreenshotService : Service() {
             imageReader?.surface, null, null
         )
 
-        Handler(Looper.getMainLooper()).postDelayed({
-            val image = imageReader?.acquireLatestImage()
-            image?.let {
-                val width = it.width
-                val height = it.height
-                val planes = it.planes
-                val buffer = planes[0].buffer
-                val pixelStride = planes[0].pixelStride
-                val rowStride = planes[0].rowStride
-                val rowPadding = rowStride - pixelStride * width
-
-                val bitmap = createBitmap(width + rowPadding / pixelStride, height)
-                bitmap.copyPixelsFromBuffer(buffer)
-                it.close()
-
-                val cropped = Bitmap.createBitmap(bitmap, 0, 0, width, height)
-
-                val file = File(externalCacheDir, "screenshot_${System.currentTimeMillis()}.png")
-                val out = FileOutputStream(file)
-                cropped.compress(Bitmap.CompressFormat.PNG, 100, out)
-                out.flush()
-                out.close()
-
-                val packageName = getForegroundApp()
-
-                val broadcast = Intent("screenshot_broadcast").apply {
-                    putExtra("screenshot_path", file.absolutePath)
-                    putExtra("captured_app", packageName)
+        screenshotCount = 0
+        screenshotHandler = Handler(Looper.getMainLooper())
+        screenshotRunnable = object : Runnable {
+            override fun run() {
+                takeAndBroadcastScreenshot()
+                screenshotCount++
+                if (screenshotCount < maxScreenshots) {
+                    screenshotHandler?.postDelayed(this, screenshotIntervalMillis)
+                } else {
+                    stopSelf()
                 }
-                Log.i(TAG, "takeScreenshot --> Got package name --> $packageName")
-                sendBroadcast(broadcast)
-
-                stopSelf()
             }
-        }, 1000)
+        }
+
+        screenshotHandler?.postDelayed(screenshotRunnable!!, 1000)
+    }
+
+    private fun takeAndBroadcastScreenshot() {
+        val image = imageReader?.acquireLatestImage() ?: return
+        val width = image.width
+        val height = image.height
+        val planes = image.planes
+        val buffer = planes[0].buffer
+        val pixelStride = planes[0].pixelStride
+        val rowStride = planes[0].rowStride
+        val rowPadding = rowStride - pixelStride * width
+
+        val bitmap = createBitmap(width + rowPadding / pixelStride, height)
+        bitmap.copyPixelsFromBuffer(buffer)
+        image.close()
+
+        val cropped = Bitmap.createBitmap(bitmap, 0, 0, width, height)
+        val file = File(externalCacheDir, "screenshot_${System.currentTimeMillis()}.png")
+        FileOutputStream(file).use { out ->
+            cropped.compress(Bitmap.CompressFormat.PNG, 100, out)
+        }
+
+        val packageName = getForegroundApp()
+        val broadcast = Intent("screenshot_broadcast").apply {
+            putExtra("screenshot_path", file.absolutePath)
+            putExtra("captured_app", packageName)
+        }
+        Log.i(TAG, "takeAndBroadcastScreenshot --> package name --> $packageName")
+        sendBroadcast(broadcast)
     }
 
     private fun getForegroundApp(): String? {
